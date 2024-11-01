@@ -45,6 +45,7 @@ if [[ "$response" =~ ^[Yy]$ ]]; then
     remove_existing_flows
     apply_flow_rules
     echo "Flow rules have been updated."
+    echo "Validate with --> sudo ovs-ofctl dump-flows br-ovs"
 else
     echo "Operation canceled by the user."
 fi
