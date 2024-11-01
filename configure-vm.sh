@@ -9,7 +9,7 @@ fi
 VM_NAME=$1
 CONF_URL="https://raw.githubusercontent.com/farsonic/isolate-flows/refs/heads/main/${VM_NAME}.conf"
 IMG_PATH="/mnt/kvm/boot/${VM_NAME}.img"
-TMP_CONF="/tmp/99-netcfg.yaml"
+TMP_CONF="/var/tmp/99-netcfg.yaml"
 
 # Download the configuration file
 sudo wget -O $TMP_CONF $CONF_URL
