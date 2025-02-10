@@ -1,16 +1,15 @@
 #!/bin/bash
 
-# Set script to exit on error
 set -e
 
 # Parse command line arguments
-while getopts "i:v:s:c:m:" opt; do
+while getopts "i:m:v:s:c:" opt; do
   case ${opt} in
     i ) INTERFACE=$OPTARG ;;
+    m ) UPLINK_MAC=$OPTARG ;;
     v ) VLAN_ID=$OPTARG ;;
     s ) SUBNET=$OPTARG ;;
     c ) VM_COUNT=$OPTARG ;;
-    m ) UPLINK_MAC=$OPTARG ;;
     * ) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
   esac
 done
@@ -38,25 +37,36 @@ BASE_IP=$(echo $SUBNET | sed 's/\.0\/.*$/.10/')
 
 # Define variables
 BASE_IMAGE="/var/tmp/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
-NETPLAN_CONFIG="/etc/netplan/99-vlan-config.yaml"
 IMAGE_URL="https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
 VM_DIR="/var/tmp"
-VM_PREFIX="VM_KVM_MACVLAN_"
+VM_PREFIX="MACVLAN_"
 
-usage() {
-    echo "Usage: $0 [-i interface] [-m uplink_mac] [-v vlan_id] [-s subnet] [-c vm_count] {start|stop}"
-    exit 1
+create_vm_conf() {
+    local VM_NAME="$1"
+    local VM_IP="$2"
+    local CONF_FILE="$VM_DIR/$VM_NAME.conf"
+    
+    cat <<EOL > "$CONF_FILE"
+network:
+  version: 2
+  ethernets:
+    enp0s2:
+      dhcp4: no
+      addresses:
+        - $VM_IP/24
+      gateway4: $GATEWAY_IP
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 8.8.4.4
+EOL
 }
-
-if [ "$#" -lt 1 ]; then
-    usage
-fi
 
 create_vm_xml() {
     local VM_NAME="$1"
     local VM_IMAGE="$VM_DIR/$VM_NAME.img"
     local XML_FILE="$VM_DIR/$VM_NAME.xml"
-
+    
     cat <<EOL > "$XML_FILE"
 <domain type='kvm'>
   <name>$VM_NAME</name>
@@ -137,10 +147,12 @@ case "$1" in
         for ((i=1; i<=VM_COUNT; i++)); do
             VM_NAME="${VM_PREFIX}${i}"
             VM_IMAGE="$VM_DIR/$VM_NAME.img"
+            VM_IP=$(echo $SUBNET | sed "s/\.0\/.*$/.$((9 + i))/")
 
             echo "Creating VM: $VM_NAME"
             sudo cp "$BASE_IMAGE" "$VM_IMAGE"
             create_vm_xml "$VM_NAME"
+            create_vm_conf "$VM_NAME" "$VM_IP"
             virsh define "$VM_DIR/$VM_NAME.xml"
             virsh start "$VM_NAME"
         done
