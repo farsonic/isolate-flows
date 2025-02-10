@@ -11,6 +11,7 @@ VM2_IMAGE="/var/tmp/vm2.img"
 CONFIG_SCRIPT="/home/pensando/isolate-flows/configure-vm.sh"
 VM1_XML="/home/pensando/isolate-flows/vm1.xml"
 VM2_XML="/home/pensando/isolate-flows/vm2.xml"
+MAC_ADDRESS="00:02:00:00:00:AA"  # Replace with actual MAC address
 
 # Make configure script executable
 chmod +x "$CONFIG_SCRIPT"
@@ -28,9 +29,17 @@ sudo virt-sysprep -a "$IMAGE_PATH"
 sudo cp "$IMAGE_PATH" "$VM1_IMAGE"
 sudo cp "$IMAGE_PATH" "$VM2_IMAGE"
 
-# Set up network interfaces
-ip link set up dev ens19
-ip link add link ens19 name vlan.10 type vlan id 10
+# Find the interface with the specific MAC address
+INTERFACE=$(ip -o link show | awk -F ': ' -v mac="$MAC_ADDRESS" '$0 ~ mac {print $2; exit}')
+
+if [ -n "$INTERFACE" ]; then
+    echo "Configuring interface: $INTERFACE"
+    ip link set up dev "$INTERFACE"
+    ip link add link "$INTERFACE" name vlan.10 type vlan id 10
+else
+    echo "Error: No interface found with MAC address $MAC_ADDRESS"
+    exit 1
+fi
 
 # Configure the VMs
 "$CONFIG_SCRIPT" vm1
