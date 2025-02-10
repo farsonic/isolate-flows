@@ -11,7 +11,7 @@ VM2_IMAGE="/var/tmp/vm2.img"
 CONFIG_SCRIPT="/home/pensando/isolate-flows/configure-vm.sh"
 VM1_XML="/home/pensando/isolate-flows/vm1.xml"
 VM2_XML="/home/pensando/isolate-flows/vm2.xml"
-MAC_ADDRESS="00:02:00:00:00:AA"  # Replace with actual MAC address
+MAC_ADDRESS="00:02:01:01:01:AA"  # Replace with actual MAC address
 
 # Make configure script executable
 chmod +x "$CONFIG_SCRIPT"
