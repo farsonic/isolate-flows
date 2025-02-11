@@ -4,7 +4,7 @@ set -e
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 [-i interface] [-m uplink_mac] [-v vlan_id] [-s subnet] [-c vm_count] {start|stop}"
+    echo "Usage: $0 [-i interface] [-m uplink_mac] [-v vlan_id] [-s subnet] [-c container_count] {start|stop}"
     exit 1
 }
 
@@ -26,11 +26,11 @@ validate_vlan() {
     fi
 }
 
-# Function to validate VM count
-validate_vm_count() {
+# Function to validate container count
+validate_container_count() {
     local count=$1
     if [[ ! $count =~ ^[0-9]+$ ]] || [ $count -lt 1 ]; then
-        echo "Invalid VM count: $count. VM count must be a positive integer."
+        echo "Invalid container count: $count. Container count must be a positive integer."
         exit 1
     fi
 }
@@ -42,7 +42,7 @@ while getopts "i:m:v:s:c:" opt; do
         m ) UPLINK_MAC=$OPTARG ;;
         v ) VLAN_ID=$OPTARG ;;
         s ) SUBNET=$OPTARG ;;
-        c ) VM_COUNT=$OPTARG ;;
+        c ) CONTAINER_COUNT=$OPTARG ;;
         * ) usage ;;
     esac
 done
@@ -64,8 +64,8 @@ if [ -n "$VLAN_ID" ]; then
     validate_vlan "$VLAN_ID"
 fi
 
-if [ -n "$VM_COUNT" ]; then
-    validate_vm_count "$VM_COUNT"
+if [ -n "$CONTAINER_COUNT" ]; then
+    validate_container_count "$CONTAINER_COUNT"
 fi
 
 # Detect the physical interface by MAC address if UPLINK_MAC is set
@@ -82,86 +82,27 @@ if [ "$ACTION" == "start" ]; then
     # Prompt user for input only if starting
     INTERFACE=${INTERFACE:-$(read -p "Enter the uplink interface name: " val && echo $val)}
     VLAN_ID=${VLAN_ID:-$(read -p "Enter VLAN number: " val && echo $val)}
-    VM_COUNT=${VM_COUNT:-$(read -p "Enter the number of VM instances to create: " val && echo $val)}
+    CONTAINER_COUNT=${CONTAINER_COUNT:-$(read -p "Enter the number of Docker containers to create: " val && echo $val)}
     SUBNET=${SUBNET:-$(read -p "Enter the subnet (e.g., 192.168.10.0/24): " val && echo $val)}
 fi
 
 VLAN_INTERFACE="vlan.${VLAN_ID}"
 GATEWAY_IP=$(echo $SUBNET | sed 's/\.0\/.*$/.1/')
-BASE_IP=$(echo $SUBNET | sed 's/\.0\/.*$/.10/')
+BASE_IP=$(echo $SUBNET | sed 's/\.0\/.*$/.100/')
 
 # Define variables
-BASE_IMAGE="/var/tmp/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
-IMAGE_URL="https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
-VM_DIR="/var/tmp"
-VM_PREFIX="VM_MACVTAP_"
-
-create_vm_conf() {
-    local VM_NAME="$1"
-    local VM_IP="$2"
-    local CONF_FILE="$VM_DIR/$VM_NAME.conf"
-
-    cat <<EOL > "$CONF_FILE"
-network:
-  version: 2
-  ethernets:
-    enp0s2:
-      dhcp4: no
-      addresses:
-        - $VM_IP/24
-      gateway4: $GATEWAY_IP
-      nameservers:
-        addresses:
-          - 8.8.8.8
-          - 8.8.4.4
-EOL
-}
-
-create_vm_xml() {
-    local VM_NAME="$1"
-    local VM_IMAGE="$VM_DIR/$VM_NAME.img"
-    local XML_FILE="$VM_DIR/$VM_NAME.xml"
-
-    cat <<EOL > "$XML_FILE"
-<domain type='kvm'>
-  <name>$VM_NAME</name>
-  <memory unit='KiB'>4194304</memory>
-  <vcpu placement='static'>2</vcpu>
-  <os>
-    <type arch='x86_64' machine='pc-i440fx-2.9'>hvm</type>
-    <boot dev='hd'/>
-  </os>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='$VM_IMAGE'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <interface type="direct">
-      <source dev="$VLAN_INTERFACE" mode="private"/>
-      <model type="virtio"/>
-    </interface>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-  </devices>
-</domain>
-EOL
-}
+CONTAINER_PREFIX="docker_macvtap_"
 
 case "$ACTION" in
     start)
-        echo "Starting VM setup..."
+        echo "Starting Docker container setup..."
 
         # Ensure required packages are installed
         REQUIRED_PACKAGES=(
-            qemu-kvm
-            libvirt-daemon-system
-            libvirt-clients
-            virt-manager
+            docker.io
             bridge-utils
             openvswitch-switch
-            guestfs-tools
+            iproute2
         )
 
         echo "Checking required packages..."
@@ -173,75 +114,67 @@ case "$ACTION" in
             fi
         done
 
-        if [ ! -f "$BASE_IMAGE" ]; then
-            echo "Base image not found. Downloading..."
-            sudo wget -P /var/tmp/ "$IMAGE_URL"
-        fi
-
-        sudo virt-customize -a "$BASE_IMAGE" --root-password password:ubuntu
-        sudo virt-sysprep -a "$BASE_IMAGE"
-
         echo "Configuring interface: $INTERFACE"
         ip link set up dev "$INTERFACE"
 
         if ! ip link show "$VLAN_INTERFACE" &>/dev/null; then
             echo "Creating VLAN interface: vlan.${VLAN_ID}"
             ip link add link "$INTERFACE" name "$VLAN_INTERFACE" type vlan id "$VLAN_ID"
+            ip link set dev "$VLAN_INTERFACE" up
         fi
 
-        sudo netplan apply || echo "Netplan apply failed, but continuing."
+        echo "Creating MACVTAP interfaces and linking to containers..."
+        for ((i=1; i<=CONTAINER_COUNT; i++)); do
+            MACVTAP_INTERFACE="macvtap${i}"
+            CONTAINER_NAME="${CONTAINER_PREFIX}${i}"
+            CONTAINER_IP=$(echo $SUBNET | sed "s/\.0\/.*$/.$((99 + i))/")
 
-        for ((i=1; i<=VM_COUNT; i++)); do
-            VM_NAME="${VM_PREFIX}${i}"
-            VM_IMAGE="$VM_DIR/$VM_NAME.img"
-            VM_IP=$(echo $SUBNET | sed "s/\.0\/.*$/.$((9 + i))/")
+            if ! ip link show "$MACVTAP_INTERFACE" &>/dev/null; then
+                echo "Creating MACVTAP interface: $MACVTAP_INTERFACE"
+                ip link add link "$VLAN_INTERFACE" name "$MACVTAP_INTERFACE" type macvtap mode private
+                ip link set dev "$MACVTAP_INTERFACE" up
+            else
+                echo "MACVTAP interface $MACVTAP_INTERFACE already exists. Skipping."
+            fi
 
-            echo "Creating VM: $VM_NAME with IP: $VM_IP"
-            sudo cp "$BASE_IMAGE" "$VM_IMAGE"
-            create_vm_xml "$VM_NAME"
-            create_vm_conf "$VM_NAME" "$VM_IP"
+            echo "Starting Docker container: $CONTAINER_NAME with IP: $CONTAINER_IP"
+            docker run -d --rm --name "$CONTAINER_NAME" \
+                --network none \
+                --privileged \
+                --cap-add=NET_ADMIN \
+                alpine sh -c "sleep infinity"
 
-            # Ensure netplan is installed and the configuration is valid
-            sudo virt-customize -a "$VM_IMAGE" --run-command 'apt update && apt install -y netplan.io'
-            sudo virt-customize -a "$VM_IMAGE" --upload $VM_DIR/$VM_NAME.conf:/etc/netplan/99-netcfg.yaml --run-command 'chmod 644 /etc/netplan/99-netcfg.yaml'
-            sudo virt-customize -a "$VM_IMAGE" --run-command 'netplan generate && netplan apply'
-            sudo virt-customize -a "$VM_IMAGE" --hostname "$VM_NAME"
+            # Get container PID and ensure namespace link exists
+            PID=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER_NAME")
+            if [ -n "$PID" ] && [ "$PID" -gt 0 ]; then
+                sudo mkdir -p /var/run/netns
+                sudo ln -sfT /proc/$PID/ns/net /var/run/netns/$CONTAINER_NAME
 
-            virsh define "$VM_DIR/$VM_NAME.xml"
-            virsh start "$VM_NAME"
-        done
+                # Move MACVTAP into container and rename it to eth0
+                echo "Assigning MACVTAP interface $MACVTAP_INTERFACE to $CONTAINER_NAME as eth0"
+                sudo ip link set "$MACVTAP_INTERFACE" netns "$PID"
+                sudo nsenter --net=/proc/$PID/ns/net ip link set dev "$MACVTAP_INTERFACE" name eth0
 
-        echo "VM setup completed successfully."
-        ;;
-    stop)
-        echo "Stopping and cleaning up VMs..."
+                # Assign IP inside the container
+                sudo nsenter --net=/proc/$PID/ns/net ip addr add "$CONTAINER_IP/24" dev eth0
+                sudo nsenter --net=/proc/$PID/ns/net ip link set eth0 up
+                sudo nsenter --net=/proc/$PID/ns/net ip route add default via "$GATEWAY_IP"
 
-        # Stop and undefine VMs
-        for VM in $(virsh list --all --name | grep "^$VM_PREFIX"); do
-            echo "Shutting down and undefining $VM"
-            virsh destroy "$VM" || echo "$VM was not running."
-            virsh undefine "$VM"
-        done
-
-        echo "Cleaning up MACVTAP interfaces..."
-
-        # Identify and delete MACVTAP interfaces associated with the VLAN
-        for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep "^macvtap"); do
-            echo "Deleting MACVTAP interface: $iface"
-            sudo ip link delete "$iface"
-        done
-
-        echo "Cleaning up files in /var/tmp/..."
-
-        # Delete VM-related files in /var/tmp/
-        for file in /var/tmp/$VM_PREFIX*; do
-            if [ -f "$file" ]; then
-                echo "Deleting file: $file"
-                sudo rm -f "$file"
+                echo "MACVTAP interface successfully assigned as eth0 in $CONTAINER_NAME with IP $CONTAINER_IP"
+            else
+                echo "Failed to retrieve PID for container $CONTAINER_NAME"
+                exit 1
             fi
         done
-
-        echo "VM teardown, MACVTAP cleanup, and file cleanup completed successfully."
+        echo "Docker container setup completed successfully."
+        ;;
+    stop)
+        echo "Stopping and cleaning up Docker containers..."
+        for CONTAINER in $(docker ps -a --format "{{.Names}}" | grep "^$CONTAINER_PREFIX"); do
+            echo "Stopping and removing container: $CONTAINER"
+            docker stop "$CONTAINER"
+        done
+        echo "Cleanup completed successfully."
         ;;
     *)
         usage
