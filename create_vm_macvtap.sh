@@ -96,25 +96,58 @@ IMAGE_URL="https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-s
 VM_DIR="/var/tmp"
 VM_PREFIX="VM_MACVTAP_"
 
-create_vm_conf() {
+# Function to generate cloud-init configuration
+generate_cloud_init() {
     local VM_NAME="$1"
     local VM_IP="$2"
-    local CONF_FILE="$VM_DIR/$VM_NAME.conf"
+    local CLOUD_INIT_DIR="$VM_DIR/$VM_NAME-cloud-init"
+    local USER_DATA="$CLOUD_INIT_DIR/user-data"
+    local META_DATA="$CLOUD_INIT_DIR/meta-data"
+    local NETWORK_CONFIG="$CLOUD_INIT_DIR/network-config"
 
-    cat <<EOL > "$CONF_FILE"
-network:
-  version: 2
-  ethernets:
-    enp0s2:
-      dhcp4: no
-      addresses:
-        - $VM_IP/24
-      gateway4: $GATEWAY_IP
-      nameservers:
-        addresses:
-          - 8.8.8.8
-          - 8.8.4.4
+    mkdir -p "$CLOUD_INIT_DIR"
+
+    # Create user-data
+    cat <<EOL > "$USER_DATA"
+#cloud-config
+hostname: $VM_NAME
+manage_etc_hosts: true
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $(cat ~/.ssh/id_rsa.pub)
+packages:
+  - qemu-guest-agent
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
 EOL
+
+    # Create meta-data
+    cat <<EOL > "$META_DATA"
+instance-id: $VM_NAME
+local-hostname: $VM_NAME
+EOL
+
+    # Create network-config
+    cat <<EOL > "$NETWORK_CONFIG"
+version: 2
+ethernets:
+  enp0s2:
+    dhcp4: no
+    addresses:
+      - $VM_IP/24
+    gateway4: $GATEWAY_IP
+    nameservers:
+      addresses:
+        - 8.8.8.8
+        - 8.8.4.4
+EOL
+
+    # Create ISO for cloud-init
+    genisoimage -output "$VM_DIR/$VM_NAME-cloud-init.iso" -volid cidata -joliet -rock "$USER_DATA" "$META_DATA" "$NETWORK_CONFIG"
 }
 
 create_vm_xml() {
@@ -137,6 +170,10 @@ create_vm_xml() {
       <source file='$VM_IMAGE'/>
       <target dev='vda' bus='virtio'/>
     </disk>
+    <disk type='file' device='cdrom'>
+      <source file='$VM_DIR/$VM_NAME-cloud-init.iso'/>
+      <target dev='hda' bus='ide'/>
+    </disk>
     <interface type="direct">
       <source dev="$VLAN_INTERFACE" mode="private"/>
       <model type="virtio"/>
@@ -144,6 +181,10 @@ create_vm_xml() {
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
+    <channel type='unix'>
+      <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/domain-$VM_NAME/org.qemu.guest_agent.0'/>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
   </devices>
 </domain>
 EOL
@@ -162,6 +203,7 @@ case "$ACTION" in
             bridge-utils
             openvswitch-switch
             guestfs-tools
+            genisoimage
         )
 
         echo "Checking required packages..."
@@ -177,9 +219,6 @@ case "$ACTION" in
             echo "Base image not found. Downloading..."
             sudo wget -P /var/tmp/ "$IMAGE_URL"
         fi
-
-        sudo virt-customize -a "$BASE_IMAGE" --root-password password:ubuntu
-        sudo virt-sysprep -a "$BASE_IMAGE"
 
         echo "Configuring interface: $INTERFACE"
         ip link set up dev "$INTERFACE"
@@ -198,14 +237,8 @@ case "$ACTION" in
 
             echo "Creating VM: $VM_NAME with IP: $VM_IP"
             sudo cp "$BASE_IMAGE" "$VM_IMAGE"
+            generate_cloud_init "$VM_NAME" "$VM_IP"
             create_vm_xml "$VM_NAME"
-            create_vm_conf "$VM_NAME" "$VM_IP"
-
-            # Ensure netplan is installed and the configuration is valid
-            sudo virt-customize -a "$VM_IMAGE" --run-command 'apt update && apt install -y netplan.io'
-            sudo virt-customize -a "$VM_IMAGE" --upload $VM_DIR/$VM_NAME.conf:/etc/netplan/99-netcfg.yaml --run-command 'chmod 644 /etc/netplan/99-netcfg.yaml'
-            sudo virt-customize -a "$VM_IMAGE" --run-command 'netplan generate && netplan apply'
-            sudo virt-customize -a "$VM_IMAGE" --hostname "$VM_NAME"
 
             virsh define "$VM_DIR/$VM_NAME.xml"
             virsh start "$VM_NAME"
