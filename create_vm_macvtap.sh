@@ -94,7 +94,7 @@ BASE_IP=$(echo $SUBNET | sed 's/\.0\/.*$/.10/')
 BASE_IMAGE="/var/tmp/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
 IMAGE_URL="https://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64-disk-kvm.img"
 VM_DIR="/var/tmp"
-VM_PREFIX="VM_KVM_MACVLAN_"
+VM_PREFIX="VM_MACVTAP_"
 
 create_vm_conf() {
     local VM_NAME="$1"
@@ -200,7 +200,13 @@ case "$ACTION" in
             sudo cp "$BASE_IMAGE" "$VM_IMAGE"
             create_vm_xml "$VM_NAME"
             create_vm_conf "$VM_NAME" "$VM_IP"
-            sudo virt-customize -a "$VM_IMAGE" --upload $VM_DIR/$VM_NAME.conf:/etc/netplan/99-netcfg.yaml --hostname "$VM_NAME" --run-command 'netplan apply'
+
+            # Ensure netplan is installed and the configuration is valid
+            sudo virt-customize -a "$VM_IMAGE" --run-command 'apt update && apt install -y netplan.io'
+            sudo virt-customize -a "$VM_IMAGE" --upload $VM_DIR/$VM_NAME.conf:/etc/netplan/99-netcfg.yaml --run-command 'chmod 644 /etc/netplan/99-netcfg.yaml'
+            sudo virt-customize -a "$VM_IMAGE" --run-command 'netplan generate && netplan apply'
+            sudo virt-customize -a "$VM_IMAGE" --hostname "$VM_NAME"
+
             virsh define "$VM_DIR/$VM_NAME.xml"
             virsh start "$VM_NAME"
         done
@@ -209,12 +215,33 @@ case "$ACTION" in
         ;;
     stop)
         echo "Stopping and cleaning up VMs..."
+
+        # Stop and undefine VMs
         for VM in $(virsh list --all --name | grep "^$VM_PREFIX"); do
             echo "Shutting down and undefining $VM"
             virsh destroy "$VM" || echo "$VM was not running."
             virsh undefine "$VM"
         done
-        echo "VM teardown completed successfully."
+
+        echo "Cleaning up MACVTAP interfaces..."
+
+        # Identify and delete MACVTAP interfaces associated with the VLAN
+        for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep "^macvtap"); do
+            echo "Deleting MACVTAP interface: $iface"
+            sudo ip link delete "$iface"
+        done
+
+        echo "Cleaning up files in /var/tmp/..."
+
+        # Delete VM-related files in /var/tmp/
+        for file in /var/tmp/$VM_PREFIX*; do
+            if [ -f "$file" ]; then
+                echo "Deleting file: $file"
+                sudo rm -f "$file"
+            fi
+        done
+
+        echo "VM teardown, MACVTAP cleanup, and file cleanup completed successfully."
         ;;
     *)
         usage
